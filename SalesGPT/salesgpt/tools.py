@@ -1,6 +1,5 @@
 import json
 import os
-
 import boto3
 import requests
 from langchain.agents import Tool
@@ -13,6 +12,7 @@ from litellm import completion
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from requests_oauthlib import OAuth1Session
 
 def setup_knowledge_base(
     product_catalog: str = None, model_name: str = "gpt-3.5-turbo"
@@ -245,6 +245,111 @@ def generate_calendly_invitation_link(query):
     else:
         return "Failed to create Calendly link: "
 
+def get_twitter_content_from_query(query):
+    '''Get the twitter content and hashtags from the query'''
+    prompt = f"""
+    Given the query: "{query}", analyze the content and extract the necessary information to generate a twitter post.
+    The information needed includes the content of the twitter post and the hashtags.
+    Return a dictionary in Python format where the keys are 'content' and 'hashtags', and the values are the corresponding pieces of information extracted from the query.
+    For example, if the query was about a new product launch, the output should look like this:
+    {{
+        "content": "We are excited to announce the launch of our new product!",
+        "hashtags": ["#NewProductLaunch", "#ProductLaunch", "#NewProduct"]
+    }}
+    Now, based on the provided query, return the structured information as described. For all the hashtags, make sure to include the # symbol in the beginning for example: #word.
+    Return a valid directly parsable json, dont return in it within a code snippet or add any kind of explanation!!
+    """
+    model_name = os.getenv("GPT_MODEL", "gpt-3.5-turbo-1106")
+    if "anthropic" in model_name:
+        response = completion_bedrock(
+            model_id=model_name,
+            system_prompt="You are a helpful assistant.",
+            messages=[{"content": prompt, "role": "user"}],
+            max_tokens=1000,
+        )
+        twitter_content = response["content"][0]["text"]
+    else:
+        response = completion(
+            model=model_name,
+            messages=[{"content": prompt, "role": "user"}],
+            max_tokens=1000,
+            temperature=0.2,
+        )
+        twitter_content = response.choices[0].message.content.strip()
+
+    return twitter_content
+
+
+def post_twitter_post(content_with_hashtags):
+    '''Post a twitter post based on the single query string using OAuth1Session'''
+    try:
+        # Get Twitter API credentials from environment variables
+        consumer_key = os.getenv("TWITTER_API_KEY")
+        consumer_secret = os.getenv("TWITTER_API_SECRET_KEY")
+        access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+        access_token_secret = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
+        
+        # Check if we have the required credentials
+        if not all([consumer_key, consumer_secret, access_token, access_token_secret]):
+            return "Missing Twitter API credentials - running in TEST MODE\n. Would post: " + content_with_hashtags
+        
+        # Prepare the tweet payload
+        payload = {"text": content_with_hashtags}
+        
+        # Create OAuth1Session with access tokens
+        oauth = OAuth1Session(
+            consumer_key,
+            client_secret=consumer_secret,
+            resource_owner_key=access_token,
+            resource_owner_secret=access_token_secret,
+        )
+        
+        # Make the request to Twitter API v2
+        response = oauth.post(
+            "https://api.twitter.com/2/tweets",
+            json=payload,
+        )
+        
+        # Check response status
+        if response.status_code == 201:
+            json_response = response.json()
+            tweet_id = json_response.get('data', {}).get('id', 'unknown')
+            return f"Twitter post posted successfully! Tweet ID: {tweet_id}"
+        else:
+            # Handle different error cases
+            if response.status_code == 403:
+                return f"TWITTER API ACCESS ISSUE - Running in TEST MODE\n📝 Generated tweet: {content_with_hashtags}\n💡 To post for real, upgrade your Twitter API access at: https://developer.x.com/en/portal/product\n🔍 Error details: {response.text}"
+            else:
+                return f"Twitter API error (status {response.status_code}): {response.text}"
+    
+    except Exception as e:
+        return f"Twitter post was not posted successfully, error: {e}"
+
+
+def generate_twitter_post(query):
+    '''Generate and return formatted twitter content with hashtags based on the query'''
+    try:
+        # Get the content and hashtags from the query
+        twitter_content = get_twitter_content_from_query(query)
+        if isinstance(twitter_content, str):
+            twitter_content = json.loads(twitter_content)
+        
+        # Format the content with hashtags
+        content = twitter_content.get("content", "")
+        hashtags = twitter_content.get("hashtags", [])
+        
+        # Combine content and hashtags
+        if hashtags:
+            hashtags_str = " ".join(hashtags)
+            formatted_post = f"{content} {hashtags_str}"
+        else:
+            formatted_post = content
+            
+        return formatted_post
+        
+    except Exception as e:
+        return f"Failed to generate twitter post: {e}"
+
 def get_tools(product_catalog):
     # query to get_tools can be used to be embedded and relevant tools found
     # see here: https://langchain-langchain.vercel.app/docs/use_cases/agents/custom_agent_with_plugin_retrieval#tool-retriever
@@ -272,6 +377,18 @@ def get_tools(product_catalog):
             func=generate_calendly_invitation_link,
             description='''Useful for when you need to create invite for a personal meeting in Sleep Heaven shop. 
             Sends a calendly invitation based on the query input.''',
+        ),
+        Tool(
+            name="GenerateTwitterPost",
+            func=generate_twitter_post, 
+            description='''Useful for when you need to generate a twitter post based on the query input. 
+            Generates a twitter post and the hashtags based on the query input.''',
+        ),
+        Tool(
+            name="PostTwitterPost",
+            func=post_twitter_post,
+            description='''Useful for when you need to post a twitter post based on the query input. 
+            Posts a twitter post based on the query input.''',
         )
     ]
 
