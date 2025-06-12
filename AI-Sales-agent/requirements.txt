@@ -1,0 +1,14 @@
+litellm 
+langfuse 
+langchain_community==0.2.10
+langchain-groq 
+langchain_google_genai
+langchain_chroma
+chromadb
+rank_bm25
+unstructured
+pydantic 
+instructor
+stripe
+colorama
+python-dotenv
