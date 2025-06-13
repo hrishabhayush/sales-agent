@@ -17,7 +17,6 @@ def generate_content(query, utm_link):
     Generate content for a twitter post based on the query
     '''
     tweet = generate_twitter_post(query)
-    utm_link = get_utm_builder_link()
     return f"{tweet}\n{utm_link}"
 
 def post_content(content):
