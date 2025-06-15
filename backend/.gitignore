@@ -2,3 +2,12 @@ __pycache__/
 
 venv/
 .vercel
+ 
+node_modules/
+
+.env
+local.env
+
+wrangler.toml
+wrangler/
+ 

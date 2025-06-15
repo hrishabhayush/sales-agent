@@ -41,7 +41,12 @@ app = FastAPI(title="Sales Agent Twitter API", version="1.0.0")
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js default port
+    allow_origins=[
+        "http://localhost:3000",  # Next.js default port
+        "https://21965a8b.sales-agent-frontend-avf.pages.dev",  # Production frontend (old)
+        "https://ab37d8bb.sales-agent-frontend-avf.pages.dev",  # Production frontend (new)
+        "https://*.pages.dev",  # Any Cloudflare Pages domain
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -111,7 +116,17 @@ def post_twitter_post_oauth2(content: str, access_token: str):
 
 @app.get("/")
 async def root():
-    return {"message": "Sales Agent Twitter API is running"}
+    return {"message": "Sales Agent Twitter API is running", "status": "healthy"}
+
+@app.get("/test")
+async def test_endpoint():
+    """Test endpoint to check if API is accessible"""
+    client_id = os.getenv("CLIENT_ID")
+    return {
+        "message": "API is accessible",
+        "environment_set": bool(client_id),
+        "timestamp": "2024-06-15"
+    }
 
 @app.post("/generate-twitter-post", response_model=GenerateTweetResponse)
 async def generate_tweet_endpoint(request: GenerateTweetRequest):

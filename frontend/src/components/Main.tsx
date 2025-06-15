@@ -49,7 +49,8 @@ export default function Main() {
     // Check if stored user ID is still valid
     const checkTwitterStatus = async (userIdToCheck: string) => {
         try {
-            const response = await fetch(`/api/twitter-status/${userIdToCheck}`)
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
+            const response = await fetch(`${apiUrl}/twitter/status/${userIdToCheck}`)
             const data = await response.json()
             
             if (data.connected) {
@@ -73,7 +74,8 @@ export default function Main() {
     const connectTwitter = async () => {
         setIsConnecting(true)
         try {
-            const response = await fetch('/api/twitter-auth-url')
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
+            const response = await fetch(`${apiUrl}/twitter/auth-url`)
             if (!response.ok) {
                 throw new Error('Failed to get authorization URL')
             }
@@ -95,7 +97,8 @@ export default function Main() {
         if (!userId) return
         
         try {
-            const response = await fetch(`/api/twitter-disconnect/${userId}`, {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
+            const response = await fetch(`${apiUrl}/twitter/disconnect/${userId}`, {
                 method: 'DELETE'
             })
             
@@ -115,7 +118,8 @@ export default function Main() {
     const generateTwitterPost = async (userQuery: string) => {
         setIsLoading(true)
         try {
-            const response = await fetch('/api/generate-tweet', {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
+            const response = await fetch(`${apiUrl}/generate-twitter-post`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -146,7 +150,8 @@ export default function Main() {
                 payload.user_id = userId
             }
             
-            const response = await fetch('/api/post-tweet', {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
+            const response = await fetch(`${apiUrl}/post-twitter-post`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
