@@ -4,8 +4,35 @@ import { useState, useEffect } from 'react'
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Input } from "@/components/ui/input"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
-type Mode = 'select' | 'generate-view' | 'generate-approve' | 'direct-post'
+type Mode = 'select' | 'generate-view' | 'generate-approve' | 'direct-post' | 'profile' | 'history'
+
+interface UserProfile {
+    id: string
+    name: string
+    twitter_username: string
+    profile_image_url: string
+    created_at: string
+}
+
+interface UserPreferences {
+    auto_post: boolean
+    content_tone: 'professional' | 'casual' | 'enthusiastic'
+    hashtags: string[]
+}
+
+interface Conversation {
+    id: string
+    query: string
+    generated_content: string
+    posted_to_twitter: boolean
+    twitter_post_id?: string
+    created_at: string
+}
 
 export default function Main() {
     const [mode, setMode] = useState<Mode>('select')
@@ -13,13 +40,24 @@ export default function Main() {
     const [query, setQuery] = useState('')
     const [tweetText, setTweetText] = useState('')
     const [generatedContent, setGeneratedContent] = useState('')
+    const [conversationId, setConversationId] = useState<string | null>(null)
     const [isLoading, setIsLoading] = useState(false)
     const [status, setStatus] = useState('')
     
-    // New OAuth 2.0 state
+    // Enhanced OAuth 2.0 state
     const [isTwitterConnected, setIsTwitterConnected] = useState(false)
     const [userId, setUserId] = useState<string | null>(null)
     const [isConnecting, setIsConnecting] = useState(false)
+    const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
+    const [userPreferences, setUserPreferences] = useState<UserPreferences>({
+        auto_post: false,
+        content_tone: 'professional',
+        hashtags: []
+    })
+    const [conversations, setConversations] = useState<Conversation[]>([])
+
+    // New backend API URL
+    const API_URL = 'https://sales-agent-backend-js.hrishabh-ay.workers.dev'
 
     // Check for OAuth callback on component mount
     useEffect(() => {
@@ -35,6 +73,9 @@ export default function Main() {
             // Store user ID in localStorage for persistence
             localStorage.setItem('twitter_user_id', userIdParam)
             
+            // Load user profile and preferences
+            loadUserProfile(userIdParam)
+            
             // Clean up URL
             window.history.replaceState({}, document.title, window.location.pathname)
         } else {
@@ -46,18 +87,38 @@ export default function Main() {
         }
     }, [])
 
+    // Load user profile and preferences
+    const loadUserProfile = async (userIdToLoad: string) => {
+        try {
+            const response = await fetch(`${API_URL}/user/profile?user_id=${userIdToLoad}`)
+            if (response.ok) {
+                const data = await response.json()
+                setUserProfile(data.user)
+                setUserPreferences(data.preferences)
+                setIsTwitterConnected(data.twitter_connected)
+            }
+        } catch (err) {
+            console.error('Error loading user profile:', err)
+        }
+    }
+
     // Check if stored user ID is still valid
     const checkTwitterStatus = async (userIdToCheck: string) => {
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
-            const response = await fetch(`${apiUrl}/twitter/status/${userIdToCheck}`)
-            const data = await response.json()
-            
-            if (data.connected) {
-                setIsTwitterConnected(true)
-                setUserId(userIdToCheck)
+            const response = await fetch(`${API_URL}/user/profile?user_id=${userIdToCheck}`)
+            if (response.ok) {
+                const data = await response.json()
+                if (data.twitter_connected) {
+                    setIsTwitterConnected(true)
+                    setUserId(userIdToCheck)
+                    setUserProfile(data.user)
+                    setUserPreferences(data.preferences)
+                } else {
+                    localStorage.removeItem('twitter_user_id')
+                    setIsTwitterConnected(false)
+                    setUserId(null)
+                }
             } else {
-                // Remove invalid user ID
                 localStorage.removeItem('twitter_user_id')
                 setIsTwitterConnected(false)
                 setUserId(null)
@@ -74,8 +135,7 @@ export default function Main() {
     const connectTwitter = async () => {
         setIsConnecting(true)
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
-            const response = await fetch(`${apiUrl}/twitter/auth-url`)
+            const response = await fetch(`${API_URL}/twitter/auth-url`)
             if (!response.ok) {
                 throw new Error('Failed to get authorization URL')
             }
@@ -97,14 +157,18 @@ export default function Main() {
         if (!userId) return
         
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
-            const response = await fetch(`${apiUrl}/twitter/disconnect/${userId}`, {
-                method: 'DELETE'
+            const response = await fetch(`${API_URL}/twitter/disconnect`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ user_id: userId }),
             })
             
             if (response.ok) {
                 setIsTwitterConnected(false)
                 setUserId(null)
+                setUserProfile(null)
                 localStorage.removeItem('twitter_user_id')
                 setStatus('Twitter disconnected successfully')
             }
@@ -114,17 +178,60 @@ export default function Main() {
         }
     }
 
-    // API calls to backend (updated to include user_id)
+    // Update user preferences
+    const updatePreferences = async (newPreferences: UserPreferences) => {
+        if (!userId) return
+        
+        try {
+            const response = await fetch(`${API_URL}/user/preferences`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    user_id: userId,
+                    preferences: newPreferences
+                }),
+            })
+            
+            if (response.ok) {
+                setUserPreferences(newPreferences)
+                setStatus('Preferences updated successfully!')
+            }
+        } catch (err) {
+            console.error('Error updating preferences:', err)
+            setStatus('Error updating preferences')
+        }
+    }
+
+    // Load conversation history
+    const loadConversations = async () => {
+        if (!userId) return
+        
+        try {
+            const response = await fetch(`${API_URL}/user/conversations?user_id=${userId}&limit=20`)
+            if (response.ok) {
+                const data = await response.json()
+                setConversations(data.conversations)
+            }
+        } catch (err) {
+            console.error('Error loading conversations:', err)
+        }
+    }
+
+    // Enhanced generate Twitter post with user_id
     const generateTwitterPost = async (userQuery: string) => {
         setIsLoading(true)
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
-            const response = await fetch(`${apiUrl}/generate-twitter-post`, {
+            const response = await fetch(`${API_URL}/generate-twitter-post`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ query: userQuery }),
+                body: JSON.stringify({ 
+                    query: userQuery,
+                    user_id: userId 
+                }),
             })
 
             if (!response.ok) {
@@ -132,6 +239,7 @@ export default function Main() {
             }
 
             const data = await response.json()
+            setConversationId(data.conversation_id)
             return data.content
         } catch (error) {
             throw new Error('Failed to generate content')
@@ -143,15 +251,16 @@ export default function Main() {
     const postToTwitter = async (content: string) => {
         setIsLoading(true)
         try {
-            const payload: { content: string; user_id?: string } = { content }
-            
-            // Include user_id if connected via OAuth 2.0
-            if (userId) {
-                payload.user_id = userId
+            const payload: { content: string; user_id: string; conversation_id?: string } = { 
+                content, 
+                user_id: userId! 
             }
             
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || '/api'
-            const response = await fetch(`${apiUrl}/post-twitter-post`, {
+            if (conversationId) {
+                payload.conversation_id = conversationId
+            }
+            
+            const response = await fetch(`${API_URL}/post-twitter-post`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -164,6 +273,10 @@ export default function Main() {
             }
 
             const data = await response.json()
+            
+            // Reload conversations to show the updated list
+            loadConversations()
+            
             return data.success
         } catch (err) {
             throw new Error('Failed to post to Twitter')
@@ -177,7 +290,12 @@ export default function Main() {
         setQuery('')
         setTweetText('')
         setGeneratedContent('')
+        setConversationId(null)
         setStatus('')
+        
+        if (selectedMode === 'history') {
+            loadConversations()
+        }
     }
 
     const handleGenerateContent = async () => {
@@ -216,6 +334,7 @@ export default function Main() {
                 setTweetText('')
                 setGeneratedContent('')
                 setUtmLink('')
+                setConversationId(null)
                 setStatus('')
             }, 2000)
         } catch (error) {
@@ -243,7 +362,7 @@ export default function Main() {
             <div className="flex items-center justify-center min-h-screen bg-gray-50">
                 <div className="bg-white p-8 rounded-lg shadow-lg max-w-md w-full">
                     <h1 className="text-2xl font-bold text-center mb-6 text-gray-800">
-                        Twitter Content Manager
+                        SalesGPT Twitter Manager
                     </h1>
                     
                     {/* Twitter Connection Status */}
@@ -253,17 +372,39 @@ export default function Main() {
                             <div className={`h-3 w-3 rounded-full ${isTwitterConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
                         </div>
                         
-                        {isTwitterConnected ? (
+                        {isTwitterConnected && userProfile ? (
                             <div className="space-y-2">
-                                <p className="text-sm text-green-600">✓ Connected</p>
-                                <Button 
-                                    variant="outline" 
-                                    size="sm"
-                                    onClick={disconnectTwitter}
-                                    className="w-full"
-                                >
-                                    Disconnect Twitter
-                                </Button>
+                                <div className="flex items-center space-x-2">
+                                    {userProfile.profile_image_url && (
+                                        <img 
+                                            src={userProfile.profile_image_url} 
+                                            alt="Profile" 
+                                            className="w-8 h-8 rounded-full"
+                                        />
+                                    )}
+                                    <div>
+                                        <p className="text-sm font-medium">@{userProfile.twitter_username}</p>
+                                        <p className="text-xs text-gray-500">{userProfile.name}</p>
+                                    </div>
+                                </div>
+                                <div className="flex space-x-2">
+                                    <Button 
+                                        variant="outline" 
+                                        size="sm"
+                                        onClick={() => setMode('profile')}
+                                        className="flex-1"
+                                    >
+                                        Profile
+                                    </Button>
+                                    <Button 
+                                        variant="outline" 
+                                        size="sm"
+                                        onClick={disconnectTwitter}
+                                        className="flex-1"
+                                    >
+                                        Disconnect
+                                    </Button>
+                                </div>
                             </div>
                         ) : (
                             <div className="space-y-2">
@@ -334,6 +475,21 @@ export default function Main() {
                                 </div>
                             </div>
                         </Button>
+
+                        {isTwitterConnected && (
+                            <Button 
+                                onClick={() => handleModeSelect('history')}
+                                className="w-full text-left justify-start h-auto p-4"
+                                variant="outline"
+                            >
+                                <div>
+                                    <div className="font-medium">4. View History</div>
+                                    <div className="text-sm text-gray-500 mt-1">
+                                        View your conversation and posting history
+                                    </div>
+                                </div>
+                            </Button>
+                        )}
                     </div>
 
                     {status && (
@@ -348,7 +504,195 @@ export default function Main() {
         )
     }
 
-    // Generate and View Mode
+    // User Profile & Preferences Screen
+    if (mode === 'profile') {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-50">
+                <div className="bg-white p-8 rounded-lg shadow-lg max-w-2xl w-full">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-2xl font-bold text-gray-800">User Profile & Preferences</h1>
+                        <Button variant="outline" onClick={() => setMode('select')}>
+                            Back
+                        </Button>
+                    </div>
+
+                    <Tabs defaultValue="profile" className="w-full">
+                        <TabsList className="grid w-full grid-cols-2">
+                            <TabsTrigger value="profile">Profile</TabsTrigger>
+                            <TabsTrigger value="preferences">Preferences</TabsTrigger>
+                        </TabsList>
+                        
+                        <TabsContent value="profile" className="space-y-4">
+                            {userProfile && (
+                                <Card>
+                                    <CardHeader>
+                                        <CardTitle>Twitter Profile</CardTitle>
+                                        <CardDescription>Your connected Twitter account information</CardDescription>
+                                    </CardHeader>
+                                    <CardContent className="space-y-4">
+                                        <div className="flex items-center space-x-4">
+                                            {userProfile.profile_image_url && (
+                                                <img 
+                                                    src={userProfile.profile_image_url} 
+                                                    alt="Profile" 
+                                                    className="w-16 h-16 rounded-full"
+                                                />
+                                            )}
+                                            <div>
+                                                <h3 className="text-lg font-semibold">{userProfile.name}</h3>
+                                                <p className="text-gray-600">@{userProfile.twitter_username}</p>
+                                                <p className="text-sm text-gray-500">
+                                                    Connected: {new Date(userProfile.created_at).toLocaleDateString()}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            )}
+                        </TabsContent>
+                        
+                        <TabsContent value="preferences" className="space-y-4">
+                            <Card>
+                                <CardHeader>
+                                    <CardTitle>Content Preferences</CardTitle>
+                                    <CardDescription>Customize how your content is generated</CardDescription>
+                                </CardHeader>
+                                <CardContent className="space-y-4">
+                                    <div>
+                                        <Label htmlFor="content-tone">Content Tone</Label>
+                                        <Select 
+                                            value={userPreferences.content_tone} 
+                                            onValueChange={(value: string) => 
+                                                setUserPreferences({...userPreferences, content_tone: value as 'professional' | 'casual' | 'enthusiastic'})
+                                            }
+                                        >
+                                            <SelectTrigger>
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="professional">Professional</SelectItem>
+                                                <SelectItem value="casual">Casual</SelectItem>
+                                                <SelectItem value="enthusiastic">Enthusiastic</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                    
+                                    <div>
+                                        <Label htmlFor="hashtags">Default Hashtags (comma-separated)</Label>
+                                        <Input
+                                            id="hashtags"
+                                            value={userPreferences.hashtags.join(', ')}
+                                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => 
+                                                setUserPreferences({
+                                                    ...userPreferences, 
+                                                    hashtags: e.target.value.split(',').map((tag: string) => tag.trim()).filter((tag: string) => tag)
+                                                })
+                                            }
+                                            placeholder="AI, SalesAutomation, Growth"
+                                        />
+                                    </div>
+                                    
+                                    <Button 
+                                        onClick={() => updatePreferences(userPreferences)}
+                                        className="w-full"
+                                    >
+                                        Save Preferences
+                                    </Button>
+                                </CardContent>
+                            </Card>
+                        </TabsContent>
+                    </Tabs>
+
+                    {status && (
+                        <div className={`mt-4 p-3 rounded ${
+                            status.includes('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                        }`}>
+                            {status}
+                        </div>
+                    )}
+                </div>
+            </div>
+        )
+    }
+
+    // Conversation History Screen
+    if (mode === 'history') {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-50">
+                <div className="bg-white p-8 rounded-lg shadow-lg max-w-4xl w-full">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-2xl font-bold text-gray-800">Conversation History</h1>
+                        <Button variant="outline" onClick={() => setMode('select')}>
+                            Back
+                        </Button>
+                    </div>
+
+                    <div className="space-y-4 max-h-96 overflow-y-auto">
+                        {conversations.length === 0 ? (
+                            <p className="text-gray-500 text-center py-8">No conversations yet. Start generating content!</p>
+                        ) : (
+                            conversations.map((conversation) => (
+                                <Card key={conversation.id}>
+                                    <CardContent className="p-4">
+                                        <div className="space-y-2">
+                                            <div className="flex justify-between items-start">
+                                                <h3 className="font-medium text-sm text-gray-600">Query:</h3>
+                                                <span className="text-xs text-gray-400">
+                                                    {new Date(conversation.created_at).toLocaleString()}
+                                                </span>
+                                            </div>
+                                            <p className="text-sm">{conversation.query}</p>
+                                            
+                                            <div className="mt-3">
+                                                <h3 className="font-medium text-sm text-gray-600">Generated Content:</h3>
+                                                <div className="bg-gray-50 p-3 rounded mt-1 text-sm whitespace-pre-wrap">
+                                                    {conversation.generated_content}
+                                                </div>
+                                            </div>
+                                            
+                                            <div className="flex justify-between items-center mt-3">
+                                                <span className={`text-xs px-2 py-1 rounded ${
+                                                    conversation.posted_to_twitter 
+                                                        ? 'bg-green-100 text-green-700' 
+                                                        : 'bg-gray-100 text-gray-700'
+                                                }`}>
+                                                    {conversation.posted_to_twitter ? '✓ Posted to Twitter' : 'Draft'}
+                                                </span>
+                                                
+                                                {!conversation.posted_to_twitter && (
+                                                    <Button 
+                                                        size="sm" 
+                                                        onClick={() => {
+                                                            setGeneratedContent(conversation.generated_content)
+                                                            setConversationId(conversation.id)
+                                                            handlePostContent(conversation.generated_content)
+                                                        }}
+                                                        disabled={isLoading}
+                                                    >
+                                                        Post Now
+                                                    </Button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            ))
+                        )}
+                    </div>
+
+                    {status && (
+                        <div className={`mt-4 p-3 rounded ${
+                            status.includes('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                        }`}>
+                            {status}
+                        </div>
+                    )}
+                </div>
+            </div>
+        )
+    }
+
+    // Generate and View Mode (existing functionality enhanced)
     if (mode === 'generate-view') {
         return (
             <div className="flex items-center justify-center min-h-screen bg-gray-50">
@@ -403,7 +747,7 @@ export default function Main() {
         )
     }
 
-    // Generate and Approve Mode
+    // Generate and Approve Mode (existing functionality enhanced)
     if (mode === 'generate-approve') {
         return (
             <div className="flex items-center justify-center min-h-screen bg-gray-50">
@@ -449,21 +793,17 @@ export default function Main() {
                                     disabled={isLoading || !isTwitterConnected}
                                     className="flex-1"
                                 >
-                                    {isLoading ? 'Posting...' : 'Post Tweet'}
+                                    {isLoading ? 'Posting...' : 'Approve & Post'}
                                 </Button>
                                 <Button 
-                                    variant="outline" 
-                                    onClick={() => setGeneratedContent('')}
+                                    variant="outline"
+                                    onClick={handleGenerateContent}
+                                    disabled={isLoading}
                                     className="flex-1"
                                 >
-                                    Cancel
+                                    Regenerate
                                 </Button>
                             </div>
-                            {!isTwitterConnected && (
-                                <p className="text-sm text-red-600 mt-2">
-                                    Please connect your Twitter account to post tweets
-                                </p>
-                            )}
                         </div>
                     )}
 
@@ -479,13 +819,13 @@ export default function Main() {
         )
     }
 
-    // Direct Post Mode
+    // Direct Post Mode (existing functionality)
     if (mode === 'direct-post') {
         return (
             <div className="flex items-center justify-center min-h-screen bg-gray-50">
                 <div className="bg-white p-8 rounded-lg shadow-lg max-w-2xl w-full">
                     <div className="flex justify-between items-center mb-6">
-                        <h1 className="text-2xl font-bold text-gray-800">Direct Post Tweet</h1>
+                        <h1 className="text-2xl font-bold text-gray-800">Direct Post</h1>
                         <Button variant="outline" onClick={() => setMode('select')}>
                             Back
                         </Button>
@@ -493,30 +833,25 @@ export default function Main() {
 
                     <div className="space-y-4 mb-6">
                         <Label htmlFor="tweet-text" className="text-sm font-medium">
-                            Enter tweet content
+                            Write your tweet
                         </Label>
                         <Textarea
                             id="tweet-text"
                             placeholder="What's happening?"
                             value={tweetText}
                             onChange={(e) => setTweetText(e.target.value)}
-                            className="min-h-[120px]"
+                            className="min-h-[150px]"
                         />
-                        <div className="text-right text-sm text-gray-500">
-                            {tweetText.length}/280
+                        <div className="text-sm text-gray-500 text-right">
+                            {tweetText.length}/280 characters
                         </div>
                         <Button 
                             onClick={handleDirectPost}
-                            disabled={isLoading || !tweetText.trim() || tweetText.length > 280 || !isTwitterConnected}
+                            disabled={isLoading || !tweetText.trim() || !isTwitterConnected}
                             className="w-full"
                         >
                             {isLoading ? 'Posting...' : 'Post Tweet'}
                         </Button>
-                        {!isTwitterConnected && (
-                            <p className="text-sm text-red-600">
-                                Please connect your Twitter account to post tweets
-                            </p>
-                        )}
                     </div>
 
                     {status && (

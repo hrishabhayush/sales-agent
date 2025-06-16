@@ -1,8 +1,7 @@
-// Cloudflare Workers JavaScript version of the backend
+// Cloudflare Workers JavaScript version of the backend with D1 Database
 
-// In-memory storage (use KV or D1 in production)
-let userSessions = {};
-let userTokens = {};
+// Import database operations
+import { userOps, sessionOps, tokenOps, conversationOps, preferencesOps } from './database.js';
 
 // CORS headers
 const corsHeaders = {
@@ -45,11 +44,92 @@ function generatePKCE() {
   });
 }
 
+// Get user info from Twitter API
+async function getTwitterUserInfo(accessToken) {
+  const response = await fetch('https://api.twitter.com/2/users/me?user.fields=profile_image_url,username', {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+    },
+  });
+  
+  if (!response.ok) {
+    throw new Error('Failed to get user info from Twitter');
+  }
+  
+  return await response.json();
+}
+
+// Generate Twitter content using OpenAI API
+async function generateTwitterContent(query, tone, hashtags, openaiApiKey) {
+  if (!openaiApiKey) {
+    throw new Error('OpenAI API key not configured');
+  }
+
+  const toneDescriptions = {
+    professional: 'professional and authoritative',
+    casual: 'casual and friendly',
+    enthusiastic: 'enthusiastic and exciting'
+  };
+
+  const toneDescription = toneDescriptions[tone] || 'professional and authoritative';
+  const hashtagsText = hashtags.length > 0 ? hashtags.map(tag => `#${tag}`).join(' ') : '#AI #SalesAutomation #Growth';
+
+  const prompt = `You are a sales and marketing expert. Create an engaging Twitter post based on this query: "${query}"
+
+Requirements:
+- Tone: ${toneDescription}
+- Maximum 280 characters (including hashtags)
+- Include relevant emojis naturally
+- Make it actionable and compelling for business audiences
+- Focus on value proposition and benefits
+- End with these hashtags: ${hashtagsText}
+
+Generate ONLY the tweet content, no explanations or additional text.`;
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${openaiApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a sales and marketing expert who creates compelling Twitter content for business audiences.'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      max_tokens: 150,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.text();
+    throw new Error(`OpenAI API error: ${response.status} ${errorData}`);
+  }
+
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content?.trim();
+  
+  if (!content) {
+    throw new Error('No content generated from OpenAI');
+  }
+
+  return content;
+}
+
 // Main request handler
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+    const db = env.DB; // D1 database binding
     
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
@@ -57,26 +137,33 @@ export default {
     }
     
     try {
-      // Routes
+      // Health check
       if (path === '/' && request.method === 'GET') {
         return new Response(JSON.stringify({
-          message: "Sales Agent Twitter API is running",
-          status: "healthy"
+          message: "SalesGPT Twitter API is running",
+          status: "healthy",
+          database: "connected"
         }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
       
+      // Test endpoint
       if (path === '/test' && request.method === 'GET') {
+        // Clean up expired sessions
+        await sessionOps.cleanupExpiredSessions(db);
+        
         return new Response(JSON.stringify({
           message: "API is accessible",
           environment_set: !!env.CLIENT_ID,
+          database_ready: !!db,
           timestamp: new Date().toISOString()
         }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
       
+      // Get Twitter auth URL
       if (path === '/twitter/auth-url' && request.method === 'GET') {
         const clientId = env.CLIENT_ID;
         if (!clientId) {
@@ -89,13 +176,12 @@ export default {
         }
         
         const { codeVerifier, codeChallenge } = await generatePKCE();
-        const state = generateRandomString(32);
         
-        // Store session data (in production, use KV storage)
-        userSessions[state] = {
-          codeVerifier,
-          codeChallenge
-        };
+        // Store session data in database
+        const sessionId = await sessionOps.createSession(db, {
+          code_verifier: codeVerifier,
+          code_challenge: codeChallenge
+        });
         
         const redirectUri = env.TWITTER_REDIRECT_URI || `${url.origin}/twitter/callback`;
         
@@ -104,7 +190,7 @@ export default {
           client_id: clientId,
           redirect_uri: redirectUri,
           scope: 'tweet.read tweet.write users.read offline.access',
-          state: state,
+          state: sessionId,
           code_challenge: codeChallenge,
           code_challenge_method: 'S256'
         });
@@ -113,7 +199,7 @@ export default {
         
         return new Response(JSON.stringify({
           auth_url: authUrl,
-          state: state
+          state: sessionId
         }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -129,11 +215,16 @@ export default {
           return new Response(`Twitter authorization error: ${error}`, { status: 400 });
         }
         
-        if (!state || !userSessions[state]) {
+        if (!state) {
+          return new Response('Missing state parameter', { status: 400 });
+        }
+        
+        // Get session from database
+        const session = await sessionOps.getSession(db, state);
+        if (!session) {
           return new Response('Invalid or expired state parameter', { status: 400 });
         }
         
-        const session = userSessions[state];
         const clientId = env.CLIENT_ID;
         const clientSecret = env.CLIENT_SECRET;
         const redirectUri = env.TWITTER_REDIRECT_URI || `${url.origin}/twitter/callback`;
@@ -144,7 +235,7 @@ export default {
           grant_type: 'authorization_code',
           client_id: clientId,
           redirect_uri: redirectUri,
-          code_verifier: session.codeVerifier
+          code_verifier: session.code_verifier
         });
         
         const authHeader = btoa(`${clientId}:${clientSecret}`);
@@ -165,27 +256,122 @@ export default {
         
         const tokens = await tokenResponse.json();
         
+        // Get user info from Twitter
+        const twitterUserInfo = await getTwitterUserInfo(tokens.access_token);
+        const twitterUser = twitterUserInfo.data;
+        
+        // Check if user already exists
+        let user = await userOps.getUserByTwitterUsername(db, twitterUser.username);
+        
+        if (!user) {
+          // Create new user
+          const userId = await userOps.createUser(db, {
+            name: twitterUser.name,
+            twitter_username: twitterUser.username,
+            profile_image_url: twitterUser.profile_image_url
+          });
+          user = { id: userId };
+        }
+        
         // Store tokens
-        const userId = generateRandomString(16);
-        userTokens[userId] = {
-          access_token: tokens.access_token,
-          refresh_token: tokens.refresh_token,
-          expires_in: tokens.expires_in,
-          scope: tokens.scope
-        };
+        await tokenOps.storeTokens(db, user.id, tokens);
         
         // Clean up session
-        delete userSessions[state];
+        await sessionOps.deleteSession(db, state);
         
         // Redirect to frontend
-        const frontendUrl = env.FRONTEND_URL || 'http://localhost:3000';
-        return Response.redirect(`${frontendUrl}?twitter_connected=true&user_id=${userId}`);
+        const frontendUrl = env.FRONTEND_URL || 'https://6ea36232.sales-agent-frontend-avf.pages.dev/';
+        return Response.redirect(`${frontendUrl}?twitter_connected=true&user_id=${user.id}`);
+      }
+      
+      // Get user profile
+      if (path === '/user/profile' && request.method === 'GET') {
+        const userId = url.searchParams.get('user_id');
+        
+        if (!userId) {
+          return new Response(JSON.stringify({ error: "User ID required" }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        
+        const user = await userOps.getUserById(db, userId);
+        const tokens = await tokenOps.getTokens(db, userId);
+        const preferences = await preferencesOps.getPreferences(db, userId);
+        
+        if (!user) {
+          return new Response(JSON.stringify({ error: "User not found" }), {
+            status: 404,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        
+        return new Response(JSON.stringify({
+          user: {
+            id: user.id,
+            name: user.name,
+            twitter_username: user.twitter_username,
+            profile_image_url: user.profile_image_url,
+            created_at: user.created_at
+          },
+          twitter_connected: !!tokens,
+          preferences: preferences || {
+            auto_post: false,
+            content_tone: 'professional',
+            hashtags: []
+          }
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      
+      // Update user preferences
+      if (path === '/user/preferences' && request.method === 'PUT') {
+        const body = await request.json();
+        const userId = body.user_id;
+        const preferences = body.preferences;
+        
+        if (!userId) {
+          return new Response(JSON.stringify({ error: "User ID required" }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        
+        const success = await preferencesOps.setPreferences(db, userId, preferences);
+        
+        return new Response(JSON.stringify({ 
+          success,
+          message: success ? "Preferences updated" : "Failed to update preferences"
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      
+      // Get user's conversation history
+      if (path === '/user/conversations' && request.method === 'GET') {
+        const userId = url.searchParams.get('user_id');
+        const limit = parseInt(url.searchParams.get('limit')) || 10;
+        
+        if (!userId) {
+          return new Response(JSON.stringify({ error: "User ID required" }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        
+        const conversations = await conversationOps.getUserConversations(db, userId, limit);
+        
+        return new Response(JSON.stringify({ conversations }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
       }
       
       // Generate tweet
       if (path === '/generate-twitter-post' && request.method === 'POST') {
         const body = await request.json();
         const query = body.query;
+        const userId = body.user_id;
         
         if (!query?.trim()) {
           return new Response(JSON.stringify({ error: "Query cannot be empty" }), {
@@ -194,12 +380,59 @@ export default {
           });
         }
         
-        // Simple tweet generation (replace with your AI logic)
-        const content = `🚀 ${query}\n\n#AI #SalesAutomation #Growth`;
+        if (!userId) {
+          return new Response(JSON.stringify({ error: "User ID required" }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
         
-        return new Response(JSON.stringify({ content }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+        // Get user preferences for personalized content
+        const preferences = await preferencesOps.getPreferences(db, userId);
+        const tone = preferences?.content_tone || 'professional';
+        const hashtags = preferences?.hashtags || [];
+        
+        try {
+          // Generate content using OpenAI API
+          const content = await generateTwitterContent(query, tone, hashtags, env.OPENAI_API_KEY);
+          
+          // Save conversation to database
+          const conversationId = await conversationOps.saveConversation(db, userId, query, content);
+          
+          return new Response(JSON.stringify({ 
+            content,
+            conversation_id: conversationId
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        } catch (error) {
+          // Fallback to basic generation if OpenAI fails
+          let content = `🚀 ${query}`;
+          
+          if (tone === 'casual') {
+            content = `Hey! ${query} 💪`;
+          } else if (tone === 'enthusiastic') {
+            content = `🔥 EXCITED TO SHARE: ${query} 🚀✨`;
+          }
+          
+          // Add user's preferred hashtags
+          if (hashtags.length > 0) {
+            content += `\n\n${hashtags.map(tag => `#${tag}`).join(' ')}`;
+          } else {
+            content += `\n\n#AI #SalesAutomation #Growth`;
+          }
+          
+          // Save conversation to database
+          const conversationId = await conversationOps.saveConversation(db, userId, query, content);
+          
+          return new Response(JSON.stringify({ 
+            content,
+            conversation_id: conversationId,
+            warning: "Using fallback generation due to AI service unavailability"
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
       }
       
       // Post tweet
@@ -207,6 +440,7 @@ export default {
         const body = await request.json();
         const content = body.content;
         const userId = body.user_id;
+        const conversationId = body.conversation_id;
         
         if (!content?.trim()) {
           return new Response(JSON.stringify({ error: "Content cannot be empty" }), {
@@ -215,14 +449,23 @@ export default {
           });
         }
         
-        if (!userId || !userTokens[userId]) {
+        if (!userId) {
+          return new Response(JSON.stringify({ error: "User ID required" }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        
+        // Get user's Twitter tokens
+        const tokenData = await tokenOps.getTokens(db, userId);
+        if (!tokenData) {
           return new Response(JSON.stringify({ error: "No valid Twitter access token found" }), {
             status: 401,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
         
-        const accessToken = userTokens[userId].access_token;
+        const accessToken = tokenData.access_token;
         
         // Post to Twitter
         const tweetResponse = await fetch('https://api.twitter.com/2/tweets', {
@@ -245,9 +488,39 @@ export default {
           });
         }
         
+        const tweetData = await tweetResponse.json();
+        
+        // Mark conversation as posted if conversation_id provided
+        if (conversationId && tweetData.data?.id) {
+          await conversationOps.markAsPosted(db, conversationId, tweetData.data.id);
+        }
+        
         return new Response(JSON.stringify({
           success: true,
-          message: "Tweet posted successfully"
+          message: "Tweet posted successfully",
+          tweet_id: tweetData.data?.id
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      
+      // Disconnect Twitter account
+      if (path === '/twitter/disconnect' && request.method === 'POST') {
+        const body = await request.json();
+        const userId = body.user_id;
+        
+        if (!userId) {
+          return new Response(JSON.stringify({ error: "User ID required" }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        
+        const success = await tokenOps.deleteTokens(db, userId);
+        
+        return new Response(JSON.stringify({
+          success,
+          message: success ? "Twitter account disconnected" : "Failed to disconnect"
         }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });

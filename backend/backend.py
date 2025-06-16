@@ -206,7 +206,7 @@ async def get_twitter_auth_url():
         }
         
         # Build authorization URL
-        redirect_uri = os.getenv("TWITTER_REDIRECT_URI", "http://localhost:8000/twitter/callback")
+        redirect_uri = os.getenv("TWITTER_REDIRECT_URI", "https://sales-agent-backend-js.hrishabh-ay.workers.dev/twitter/callback")
         
         params = {
             'response_type': 'code',
@@ -249,7 +249,7 @@ async def twitter_callback(
         # Exchange code for tokens
         client_id = os.getenv("CLIENT_ID")
         client_secret = os.getenv("CLIENT_SECRET")
-        redirect_uri = os.getenv("TWITTER_REDIRECT_URI", "http://localhost:8000/twitter/callback")
+        redirect_uri = os.getenv("TWITTER_REDIRECT_URI", "https://sales-agent-backend-js.hrishabh-ay.workers.dev/twitter/callback")
         
         token_data = {
             'code': code,
@@ -296,7 +296,7 @@ async def twitter_callback(
         del user_sessions[state]
         
         # Redirect to frontend with success
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        frontend_url = os.getenv("FRONTEND_URL", "https://6ea36232.sales-agent-frontend-avf.pages.dev/")
         return RedirectResponse(url=f"{frontend_url}?twitter_connected=true&user_id={user_id}")
         
     except HTTPException:
@@ -335,8 +335,6 @@ async def health_check():
 
 if __name__ == "__main__":
     print("Starting Sales Agent Twitter API server...")
-    print("API Documentation available at: http://localhost:8000/docs")
-    print("Frontend should connect to: http://localhost:8000")
     
     uvicorn.run(
         "backend:app",
