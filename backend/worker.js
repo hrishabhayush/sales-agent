@@ -1,4 +1,13 @@
 // Cloudflare Workers JavaScript version of the backend with D1 Database
+// 
+// This implementation follows the patterns and function signatures from 
+// sales-agent/SalesGPT/salesgpt/tools.py, porting the key functions to JavaScript:
+// - get_twitter_content_from_query() -> getTwitterContentFromQuery()
+// - generate_twitter_post() -> generateTwitterPost() 
+// - post_twitter_post() -> postToTwitter()
+//
+// The functions maintain the same separation of concerns and error handling
+// patterns as the original Python tools.
 
 // Import database operations
 import { userOps, sessionOps, tokenOps, conversationOps, preferencesOps } from './database.js';
@@ -59,32 +68,39 @@ async function getTwitterUserInfo(accessToken) {
   return await response.json();
 }
 
-// Generate Twitter content using OpenAI API
-async function generateTwitterContent(query, tone, hashtags, openaiApiKey) {
+// Get user info from Linkedin API
+async function getLinkedinUserInfo(accessToken) {
+  const response = await fetch('https://api.linkedin.com/v2/userinfo', {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+    },
+  });
+  
+  if (!response.ok) {
+    throw new Error('Failed to get user info from Linkedin');
+  }
+  
+  return await response.json();
+}
+
+// === TOOLS.PY INSPIRED FUNCTIONS ===
+
+// Get Twitter content and hashtags from query (inspired by get_twitter_content_from_query)
+async function getTwitterContentFromQuery(query, openaiApiKey) {
   if (!openaiApiKey) {
     throw new Error('OpenAI API key not configured');
   }
 
-  const toneDescriptions = {
-    professional: 'professional and authoritative',
-    casual: 'casual and friendly',
-    enthusiastic: 'enthusiastic and exciting'
-  };
-
-  const toneDescription = toneDescriptions[tone] || 'professional and authoritative';
-  const hashtagsText = hashtags.length > 0 ? hashtags.map(tag => `#${tag}`).join(' ') : '#AI #SalesAutomation #Growth';
-
-  const prompt = `You are a sales and marketing expert. Create an engaging Twitter post based on this query: "${query}"
-
-Requirements:
-- Tone: ${toneDescription}
-- Maximum 280 characters (including hashtags)
-- Include relevant emojis naturally
-- Make it actionable and compelling for business audiences
-- Focus on value proposition and benefits
-- End with these hashtags: ${hashtagsText}
-
-Generate ONLY the tweet content, no explanations or additional text.`;
+  const prompt = `Given the query: "${query}", analyze the content and extract the necessary information to generate a twitter post.
+The information needed includes the content of the twitter post and the hashtags.
+Return a dictionary in JSON format where the keys are 'content' and 'hashtags', and the values are the corresponding pieces of information extracted from the query.
+For example, if the query was about a new product launch, the output should look like this:
+{
+    "content": "We are excited to announce the launch of our new product!",
+    "hashtags": ["#NewProductLaunch", "#ProductLaunch", "#NewProduct"]
+}
+Now, based on the provided query, return the structured information as described. For all the hashtags, make sure to include the # symbol in the beginning for example: #word.
+Return a valid directly parsable json, dont return in it within a code snippet or add any kind of explanation!!`;
 
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -97,15 +113,15 @@ Generate ONLY the tweet content, no explanations or additional text.`;
       messages: [
         {
           role: 'system',
-          content: 'You are a sales and marketing expert who creates compelling Twitter content for business audiences.'
+          content: 'You are a helpful assistant that generates Twitter content.'
         },
         {
           role: 'user',
           content: prompt
         }
       ],
-      max_tokens: 150,
-      temperature: 0.7,
+      max_tokens: 1000,
+      temperature: 0.2,
     }),
   });
 
@@ -121,8 +137,99 @@ Generate ONLY the tweet content, no explanations or additional text.`;
     throw new Error('No content generated from OpenAI');
   }
 
-  return content;
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    throw new Error('Failed to parse OpenAI response as JSON');
+  }
 }
+
+// Generate formatted Twitter post (inspired by generate_twitter_post)
+async function generateTwitterPost(query, openaiApiKey) {
+  try {
+    // Get the content and hashtags from the query
+    const twitterContent = await getTwitterContentFromQuery(query, openaiApiKey);
+    
+    // Format the content with hashtags
+    const content = twitterContent.content || '';
+    const hashtags = twitterContent.hashtags || [];
+    
+    // Combine content and hashtags
+    let formattedPost = content;
+    if (hashtags.length > 0) {
+      const hashtagsStr = hashtags.join(' ');
+      formattedPost = `${content} ${hashtagsStr}`;
+    }
+    
+    return formattedPost;
+    
+  } catch (error) {
+    throw new Error(`Failed to generate twitter post: ${error.message}`);
+  }
+}
+
+// Fallback content generation (when OpenAI is not available)
+function generateFallbackTwitterContent(query, tone, hashtags) {
+  const toneDescriptions = {
+    professional: 'Explore how',
+    casual: 'Hey! Let\'s talk about',
+    enthusiastic: '🔥 EXCITED TO SHARE:'
+  };
+
+  const toneStart = toneDescriptions[tone] || 'Explore how';
+  const hashtagsText = hashtags.length > 0 ? hashtags.map(tag => `#${tag}`).join(' ') : '#AI #SalesAutomation #Growth';
+
+  let content = `${toneStart} ${query}`;
+  
+  if (tone === 'enthusiastic') {
+    content += ' 🚀✨';
+  } else if (tone === 'casual') {
+    content += ' 💪';
+  }
+  
+  return `${content}\n\n${hashtagsText}`;
+}
+
+// Post to Twitter (inspired by post_twitter_post but using OAuth2)
+async function postToTwitter(content, accessToken) {
+  const response = await fetch('https://api.twitter.com/2/tweets', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text: content })
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to post tweet: ${errorText}`);
+  }
+  
+  return await response.json();
+}
+
+// Post to Linkedin (inspired by post_linkedin_post but using OAuth2)
+async function postToLinkedin(content, accessToken) {
+  const response = await fetch('https://api.linkedin.com/v2/posts', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text: content })
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to post linkedin post: ${errorText}`);
+  }
+  
+  return await response.json();
+}
+
+
+// === END TOOLS.PY INSPIRED FUNCTIONS ===
 
 // Main request handler
 export default {
@@ -394,7 +501,7 @@ export default {
         
         try {
           // Generate content using OpenAI API
-          const content = await generateTwitterContent(query, tone, hashtags, env.OPENAI_API_KEY);
+          const content = await generateTwitterPost(query, env.OPENAI_API_KEY);
           
           // Save conversation to database
           const conversationId = await conversationOps.saveConversation(db, userId, query, content);
@@ -407,20 +514,7 @@ export default {
           });
         } catch (error) {
           // Fallback to basic generation if OpenAI fails
-          let content = `🚀 ${query}`;
-          
-          if (tone === 'casual') {
-            content = `Hey! ${query} 💪`;
-          } else if (tone === 'enthusiastic') {
-            content = `🔥 EXCITED TO SHARE: ${query} 🚀✨`;
-          }
-          
-          // Add user's preferred hashtags
-          if (hashtags.length > 0) {
-            content += `\n\n${hashtags.map(tag => `#${tag}`).join(' ')}`;
-          } else {
-            content += `\n\n#AI #SalesAutomation #Growth`;
-          }
+          let content = generateFallbackTwitterContent(query, tone, hashtags);
           
           // Save conversation to database
           const conversationId = await conversationOps.saveConversation(db, userId, query, content);
@@ -467,41 +561,31 @@ export default {
         
         const accessToken = tokenData.access_token;
         
-        // Post to Twitter
-        const tweetResponse = await fetch('https://api.twitter.com/2/tweets', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ text: content })
-        });
-        
-        if (!tweetResponse.ok) {
-          const errorText = await tweetResponse.text();
+        try {
+          // Post to Twitter using tools.py inspired function
+          const tweetData = await postToTwitter(content, accessToken);
+          
+          // Mark conversation as posted if conversation_id provided
+          if (conversationId && tweetData.data?.id) {
+            await conversationOps.markAsPosted(db, conversationId, tweetData.data.id);
+          }
+          
+          return new Response(JSON.stringify({
+            success: true,
+            message: "Tweet posted successfully",
+            tweet_id: tweetData.data?.id
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        } catch (error) {
           return new Response(JSON.stringify({ 
             success: false, 
-            message: `Failed to post tweet: ${errorText}` 
+            message: `Failed to post tweet: ${error.message}` 
           }), {
             status: 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
-        
-        const tweetData = await tweetResponse.json();
-        
-        // Mark conversation as posted if conversation_id provided
-        if (conversationId && tweetData.data?.id) {
-          await conversationOps.markAsPosted(db, conversationId, tweetData.data.id);
-        }
-        
-        return new Response(JSON.stringify({
-          success: true,
-          message: "Tweet posted successfully",
-          tweet_id: tweetData.data?.id
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
       }
       
       // Disconnect Twitter account
