@@ -68,20 +68,7 @@ async function getTwitterUserInfo(accessToken) {
   return await response.json();
 }
 
-// Get user info from Linkedin API
-async function getLinkedinUserInfo(accessToken) {
-  const response = await fetch('https://api.linkedin.com/v2/userinfo', {
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-    },
-  });
-  
-  if (!response.ok) {
-    throw new Error('Failed to get user info from Linkedin');
-  }
-  
-  return await response.json();
-}
+
 
 // === TOOLS.PY INSPIRED FUNCTIONS ===
 

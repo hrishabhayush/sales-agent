@@ -373,6 +373,140 @@ def generate_twitter_post(query):
     except Exception as e:
         return f"Failed to generate twitter post: {e}"
 
+def get_linkedin_post_from_query(query):
+    '''Get a linkedin post based on the query'''
+    prompt = f"""
+    Given the query: "{query}", generate a professional LinkedIn post.
+    
+    Write a well-crafted, engaging LinkedIn post that is professional, authentic, and suitable for LinkedIn's audience.
+    The post should be written as natural paragraphs.
+    Do not include hashtags.
+    Return ONLY the text content of the LinkedIn post, nothing else.
+    """
+    model_name = os.getenv("GPT_MODEL", "gpt-3.5-turbo-1106")
+    
+    if "anthropic" in model_name:
+        response = completion_bedrock(
+            model_id=model_name,
+            system_prompt="You are a helpful assistant.",
+            messages=[{"content": prompt, "role": "user"}],
+            max_tokens=1000,
+        )   
+        linkedin_post = response["content"][0]["text"]
+    else:
+        response = completion(
+            model=model_name,
+            messages=[{"content": prompt, "role": "user"}],
+            max_tokens=1000,
+        )
+        linkedin_post = response.choices[0].message.content.strip()
+    
+    return linkedin_post
+    
+def post_linkedin_post(query):
+    '''Post a linkedin post based on the single query string using OAuth 2.0'''
+    client_id = os.getenv("LINKEDIN_CLIENT_ID")
+    client_secret = os.getenv("LINKEDIN_CLIENT_SECRET")
+    redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI", "https://oauth.pstmn.io/v1/callback")
+    
+    if not client_id or not client_secret:
+        return "LinkedIn credentials not configured. Please set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET environment variables."
+    
+    # Get LinkedIn post content
+    linkedin_content = get_linkedin_post_from_query(query)
+    print(f"Generated LinkedIn content: {linkedin_content}")
+    
+    try:
+        # Step 1: Get authorization URL
+        auth_url = (
+            f"https://www.linkedin.com/oauth/v2/authorization?"
+            f"response_type=code&"
+            f"client_id={client_id}&"
+            f"redirect_uri={redirect_uri}&"
+            f"state=linkedin_post_state&"
+            f"scope=w_member_social"
+        )
+        
+        print(f"Please go here and authorize: {auth_url}")
+        auth_code = input("Paste the authorization code here: ")
+        
+        # Step 2: Exchange authorization code for access token
+        token_url = "https://www.linkedin.com/oauth/v2/accessToken"
+        token_data = {
+            'grant_type': 'authorization_code',
+            'code': auth_code,
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'redirect_uri': redirect_uri
+        }
+        
+        token_response = requests.post(token_url, data=token_data)
+        
+        if token_response.status_code != 200:
+            return f"Failed to get access token: {token_response.text}"
+        
+        token_json = token_response.json()
+        access_token = token_json.get('access_token')
+        
+        if not access_token:
+            return "Failed to retrieve access token from LinkedIn"
+        
+        # Step 3: Get user profile to get person URN
+        profile_url = "https://api.linkedin.com/v2/me"
+        profile_headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        profile_response = requests.get(profile_url, headers=profile_headers)
+        
+        if profile_response.status_code != 200:
+            return f"Failed to get user profile: {profile_response.text}"
+        
+        profile_data = profile_response.json()
+        person_id = profile_data.get('id')
+        
+        if not person_id:
+            return "Failed to get user ID from LinkedIn profile"
+        
+        # Step 4: Create LinkedIn post
+        post_url = "https://api.linkedin.com/v2/ugcPosts"
+        
+        post_payload = {
+            "author": f"urn:li:person:{person_id}",
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {
+                        "text": linkedin_content
+                    },
+                    "shareMediaCategory": "NONE"
+                }
+            },
+            "visibility": {
+                "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+            }
+        }
+        
+        post_headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json',
+            'X-Restli-Protocol-Version': '2.0.0'
+        }
+        
+        # Make the post request
+        response = requests.post(post_url, json=post_payload, headers=post_headers)
+        
+        if response.status_code == 201:
+            response_data = response.json()
+            post_id = response_data.get('id', 'Unknown')
+            return f"LinkedIn post posted successfully! Post ID: {post_id}"
+        else:
+            return f"Failed to post LinkedIn post. Status: {response.status_code}, Response: {response.text}"
+            
+    except Exception as e:
+        return f"Error posting LinkedIn post: {str(e)}"
+
 def get_tools(product_catalog):
     # query to get_tools can be used to be embedded and relevant tools found
     # see here: https://langchain-langchain.vercel.app/docs/use_cases/agents/custom_agent_with_plugin_retrieval#tool-retriever
@@ -412,6 +546,18 @@ def get_tools(product_catalog):
             func=post_twitter_post,
             description='''Useful for when you need to post a twitter post based on the query input. 
             Posts a twitter post based on the query input.''',
+        ),
+        Tool(
+            name="GenerateLinkedInPost",
+            func=get_linkedin_post_from_query,
+            description='''Useful for when you need to generate a LinkedIn post based on the query input. 
+            Generates professional LinkedIn content based on the query input.''',
+        ),
+        Tool(
+            name="PostLinkedInPost",
+            func=post_linkedin_post,
+            description='''Useful for when you need to post a linkedin post based on the query input. 
+            Posts a linkedin post based on the query input.''',
         )
     ]
 
